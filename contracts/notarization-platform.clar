@@ -277,6 +277,7 @@
 )
 
 (define-data-var default-expiration-period uint u52560)
+
 (define-public (set-document-expiration
     (hash (string-ascii 64))
     (expiration-blocks uint)
@@ -305,10 +306,10 @@
 (define-public (renew-document (hash (string-ascii 64)))
     (let
         ((doc-info (unwrap! (get-document-info hash) ERR-DOCUMENT-NOT-FOUND))
-          (expiration-info (unwrap! (map-get? document-expiration { hash: hash }) ERR-EXPIRATION-NOT-SET))
-          (current-block stacks-block-height)
-          (new-expiration (+ current-block (get renewal-period expiration-info)))
-          (new-renewal-count (+ (get renewal-count expiration-info) u1)))
+         (expiration-info (unwrap! (map-get? document-expiration { hash: hash }) ERR-EXPIRATION-NOT-SET))
+         (current-block stacks-block-height)
+         (new-expiration (+ current-block (get renewal-period expiration-info)))
+         (new-renewal-count (+ (get renewal-count expiration-info) u1)))
         (asserts! (is-eq tx-sender (get owner doc-info)) ERR-NOT-AUTHORIZED)
         (asserts! (get is-renewable expiration-info) ERR-RENEWAL-NOT-ALLOWED)
         (asserts! (< (get renewal-count expiration-info) (get max-renewals expiration-info)) ERR-RENEWAL-NOT-ALLOWED)
@@ -340,8 +341,8 @@
     (additional-blocks uint))
     (let
         ((doc-info (unwrap! (get-document-info hash) ERR-DOCUMENT-NOT-FOUND))
-          (expiration-info (unwrap! (map-get? document-expiration { hash: hash }) ERR-EXPIRATION-NOT-SET))
-          (new-expiration (+ (get expiration-block expiration-info) additional-blocks)))
+         (expiration-info (unwrap! (map-get? document-expiration { hash: hash }) ERR-EXPIRATION-NOT-SET))
+         (new-expiration (+ (get expiration-block expiration-info) additional-blocks)))
         (asserts! (is-eq tx-sender (get owner doc-info)) ERR-NOT-AUTHORIZED)
         (asserts! (> additional-blocks u0) ERR-INVALID-EXPIRATION)
         (map-set document-expiration
