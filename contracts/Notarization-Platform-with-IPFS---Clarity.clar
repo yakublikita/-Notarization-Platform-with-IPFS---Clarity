@@ -255,6 +255,10 @@
 (define-constant ERR-RENEWAL-NOT-ALLOWED (err u302))
 (define-constant ERR-EXPIRATION-NOT-SET (err u303))
 
+(define-constant ERR-INVALID-CATEGORY (err u400))
+(define-constant ERR-CATEGORY-NOT-FOUND (err u401))
+(define-constant ERR-CATEGORY-EXISTS (err u402))
+
 (define-map document-expiration
     { hash: (string-ascii 64) }
     {
@@ -277,6 +281,18 @@
 )
 
 (define-data-var default-expiration-period uint u52560)
+
+(define-map document-categories
+    { hash: (string-ascii 64) }
+    { category: (string-ascii 32) }
+)
+
+(define-map category-documents
+    { category: (string-ascii 32), hash: (string-ascii 64) }
+    { exists: bool }
+)
+
+(define-data-var total-categories uint u0)
 (define-public (set-document-expiration
     (hash (string-ascii 64))
     (expiration-blocks uint)
@@ -399,4 +415,59 @@
 
 (define-read-only (get-default-expiration-period)
     (ok (var-get default-expiration-period))
+)
+
+(define-public (set-document-category
+    (hash (string-ascii 64))
+    (category (string-ascii 32)))
+    (let
+        ((doc-info (unwrap! (get-document-info hash) ERR-DOCUMENT-NOT-FOUND))
+         (existing-category (map-get? document-categories { hash: hash })))
+        (asserts! (is-eq tx-sender (get owner doc-info)) ERR-NOT-AUTHORIZED)
+        (asserts! (> (len category) u0) ERR-INVALID-CATEGORY)
+        (asserts! (<= (len category) u32) ERR-INVALID-CATEGORY)
+        (if (is-some existing-category)
+            (let ((old-category (get category (unwrap-panic existing-category))))
+                (map-delete category-documents { category: old-category, hash: hash }))
+            (var-set total-categories (+ (var-get total-categories) u1)))
+        (map-set document-categories
+            { hash: hash }
+            { category: category })
+        (map-set category-documents
+            { category: category, hash: hash }
+            { exists: true })
+        (ok true)
+    )
+)
+
+(define-public (remove-document-category (hash (string-ascii 64)))
+    (let
+        ((doc-info (unwrap! (get-document-info hash) ERR-DOCUMENT-NOT-FOUND))
+         (category-info (unwrap! (map-get? document-categories { hash: hash }) ERR-CATEGORY-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (get owner doc-info)) ERR-NOT-AUTHORIZED)
+        (map-delete document-categories { hash: hash })
+        (map-delete category-documents { category: (get category category-info), hash: hash })
+        (var-set total-categories (- (var-get total-categories) u1))
+        (ok true)
+    )
+)
+
+(define-read-only (get-document-category (hash (string-ascii 64)))
+    (ok (map-get? document-categories { hash: hash }))
+)
+
+(define-read-only (is-document-in-category
+    (hash (string-ascii 64))
+    (category (string-ascii 32)))
+    (ok (is-some (map-get? category-documents { category: category, hash: hash })))
+)
+
+(define-read-only (get-total-categories)
+    (ok (var-get total-categories))
+)
+
+(define-private (validate-category (category (string-ascii 32)))
+    (if (and (> (len category) u0) (<= (len category) u32))
+        (ok true)
+        ERR-INVALID-CATEGORY)
 )
