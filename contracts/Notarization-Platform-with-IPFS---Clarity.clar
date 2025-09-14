@@ -471,3 +471,158 @@
         (ok true)
         ERR-INVALID-CATEGORY)
 )
+
+(define-constant ERR-AMENDMENT-NOT-FOUND (err u500))
+(define-constant ERR-INVALID-AMENDMENT-REASON (err u501))
+(define-constant ERR-MAX-AMENDMENTS-REACHED (err u502))
+(define-constant ERR-INVALID-AMENDMENT-HASH (err u503))
+
+(define-map document-amendments
+    { original-hash: (string-ascii 64), amendment-id: uint }
+    {
+        amendment-hash: (string-ascii 64),
+        amended-by: principal,
+        amendment-timestamp: uint,
+        amendment-reason: (string-ascii 256),
+        is-active: bool
+    }
+)
+
+(define-map amendment-summary
+    { hash: (string-ascii 64) }
+    {
+        total-amendments: uint,
+        latest-amendment-hash: (string-ascii 64),
+        latest-amendment-timestamp: uint,
+        max-amendments-allowed: uint
+    }
+)
+
+(define-data-var total-amendments uint u0)
+(define-data-var default-max-amendments uint u10)
+
+(define-public (create-amendment
+    (original-hash (string-ascii 64))
+    (amendment-hash (string-ascii 64))
+    (amendment-reason (string-ascii 256)))
+    (let
+        ((doc-info (unwrap! (get-document-info original-hash) ERR-DOCUMENT-NOT-FOUND))
+         (current-summary (default-to
+            {
+                total-amendments: u0,
+                latest-amendment-hash: "",
+                latest-amendment-timestamp: u0,
+                max-amendments-allowed: (var-get default-max-amendments)
+            }
+            (map-get? amendment-summary { hash: original-hash })))
+         (new-amendment-id (+ (get total-amendments current-summary) u1))
+         (current-block stacks-block-height))
+        (asserts! (is-eq tx-sender (get owner doc-info)) ERR-NOT-AUTHORIZED)
+        (asserts! (> (len amendment-reason) u0) ERR-INVALID-AMENDMENT-REASON)
+        (asserts! (<= (len amendment-reason) u256) ERR-INVALID-AMENDMENT-REASON)
+        (try! (validate-hash amendment-hash))
+        (asserts! (not (is-eq original-hash amendment-hash)) ERR-INVALID-AMENDMENT-HASH)
+        (asserts! (< (get total-amendments current-summary) (get max-amendments-allowed current-summary)) ERR-MAX-AMENDMENTS-REACHED)
+        (map-set document-amendments
+            { original-hash: original-hash, amendment-id: new-amendment-id }
+            {
+                amendment-hash: amendment-hash,
+                amended-by: tx-sender,
+                amendment-timestamp: current-block,
+                amendment-reason: amendment-reason,
+                is-active: true
+            }
+        )
+        (map-set amendment-summary
+            { hash: original-hash }
+            {
+                total-amendments: new-amendment-id,
+                latest-amendment-hash: amendment-hash,
+                latest-amendment-timestamp: current-block,
+                max-amendments-allowed: (get max-amendments-allowed current-summary)
+            }
+        )
+        (var-set total-amendments (+ (var-get total-amendments) u1))
+        (ok new-amendment-id)
+    )
+)
+
+(define-public (set-max-amendments
+    (hash (string-ascii 64))
+    (max-amendments uint))
+    (let
+        ((doc-info (unwrap! (get-document-info hash) ERR-DOCUMENT-NOT-FOUND))
+         (current-summary (default-to
+            {
+                total-amendments: u0,
+                latest-amendment-hash: "",
+                latest-amendment-timestamp: u0,
+                max-amendments-allowed: (var-get default-max-amendments)
+            }
+            (map-get? amendment-summary { hash: hash }))))
+        (asserts! (is-eq tx-sender (get owner doc-info)) ERR-NOT-AUTHORIZED)
+        (asserts! (>= max-amendments (get total-amendments current-summary)) ERR-INVALID-EXPIRATION)
+        (map-set amendment-summary
+            { hash: hash }
+            {
+                total-amendments: (get total-amendments current-summary),
+                latest-amendment-hash: (get latest-amendment-hash current-summary),
+                latest-amendment-timestamp: (get latest-amendment-timestamp current-summary),
+                max-amendments-allowed: max-amendments
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-document-amendment
+    (original-hash (string-ascii 64))
+    (amendment-id uint))
+    (ok (map-get? document-amendments { original-hash: original-hash, amendment-id: amendment-id }))
+)
+
+(define-read-only (get-amendment-summary (hash (string-ascii 64)))
+    (ok (map-get? amendment-summary { hash: hash }))
+)
+
+(define-read-only (get-latest-amendment (hash (string-ascii 64)))
+    (match (map-get? amendment-summary { hash: hash })
+        summary-info
+            (if (> (get total-amendments summary-info) u0)
+                (ok (map-get? document-amendments 
+                    { original-hash: hash, amendment-id: (get total-amendments summary-info) }))
+                (ok none))
+        (ok none)
+    )
+)
+
+(define-read-only (has-amendments (hash (string-ascii 64)))
+    (match (map-get? amendment-summary { hash: hash })
+        summary-info (ok (> (get total-amendments summary-info) u0))
+        (ok false)
+    )
+)
+
+(define-read-only (can-create-amendment (hash (string-ascii 64)))
+    (match (map-get? amendment-summary { hash: hash })
+        summary-info (ok (< (get total-amendments summary-info) (get max-amendments-allowed summary-info)))
+        (ok true)
+    )
+)
+
+(define-read-only (get-total-amendments)
+    (ok (var-get total-amendments))
+)
+
+(define-public (set-default-max-amendments (max-amendments uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> max-amendments u0) ERR-INVALID-EXPIRATION)
+        (var-set default-max-amendments max-amendments)
+        (ok true)
+    )
+)
+
+(define-read-only (get-default-max-amendments)
+    (ok (var-get default-max-amendments))
+)
