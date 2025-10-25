@@ -626,3 +626,167 @@
 (define-read-only (get-default-max-amendments)
     (ok (var-get default-max-amendments))
 )
+
+(define-constant ERR-TRANSFER-NOT-FOUND (err u600))
+(define-constant ERR-TRANSFER-EXISTS (err u601))
+(define-constant ERR-NOT-TRANSFER-RECIPIENT (err u602))
+(define-constant ERR-TRANSFER-EXPIRED (err u603))
+(define-constant ERR-CANNOT-TRANSFER-TO-SELF (err u604))
+
+(define-map ownership-transfers
+    { hash: (string-ascii 64) }
+    {
+        from-owner: principal,
+        to-owner: principal,
+        initiated-at: uint,
+        expiration-block: uint,
+        is-pending: bool
+    }
+)
+
+(define-map transfer-history
+    { hash: (string-ascii 64), transfer-id: uint }
+    {
+        from-owner: principal,
+        to-owner: principal,
+        completed-at: uint,
+        initiated-at: uint
+    }
+)
+
+(define-map document-transfer-count
+    { hash: (string-ascii 64) }
+    { count: uint }
+)
+
+(define-data-var total-transfers uint u0)
+(define-data-var transfer-expiration-blocks uint u1440)
+
+(define-public (initiate-ownership-transfer
+    (hash (string-ascii 64))
+    (new-owner principal))
+    (let
+        ((doc-info (unwrap! (get-document-info hash) ERR-DOCUMENT-NOT-FOUND))
+         (existing-transfer (map-get? ownership-transfers { hash: hash }))
+         (expiration-block (+ stacks-block-height (var-get transfer-expiration-blocks))))
+        (asserts! (is-eq tx-sender (get owner doc-info)) ERR-NOT-AUTHORIZED)
+        (asserts! (not (is-eq tx-sender new-owner)) ERR-CANNOT-TRANSFER-TO-SELF)
+        (asserts! (is-none existing-transfer) ERR-TRANSFER-EXISTS)
+        (map-set ownership-transfers
+            { hash: hash }
+            {
+                from-owner: tx-sender,
+                to-owner: new-owner,
+                initiated-at: stacks-block-height,
+                expiration-block: expiration-block,
+                is-pending: true
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (accept-ownership-transfer (hash (string-ascii 64)))
+    (let
+        ((doc-info (unwrap! (get-document-info hash) ERR-DOCUMENT-NOT-FOUND))
+         (transfer-info (unwrap! (map-get? ownership-transfers { hash: hash }) ERR-TRANSFER-NOT-FOUND))
+         (current-count (default-to { count: u0 } (map-get? document-transfer-count { hash: hash })))
+         (new-transfer-id (+ (get count current-count) u1)))
+        (asserts! (get is-pending transfer-info) ERR-TRANSFER-NOT-FOUND)
+        (asserts! (is-eq tx-sender (get to-owner transfer-info)) ERR-NOT-TRANSFER-RECIPIENT)
+        (asserts! (<= stacks-block-height (get expiration-block transfer-info)) ERR-TRANSFER-EXPIRED)
+        (map-set documents
+            { hash: hash }
+            {
+                owner: tx-sender,
+                timestamp: (get timestamp doc-info),
+                title: (get title doc-info),
+                description: (get description doc-info),
+                is-private: (get is-private doc-info)
+            }
+        )
+        (map-set transfer-history
+            { hash: hash, transfer-id: new-transfer-id }
+            {
+                from-owner: (get from-owner transfer-info),
+                to-owner: tx-sender,
+                completed-at: stacks-block-height,
+                initiated-at: (get initiated-at transfer-info)
+            }
+        )
+        (map-set document-transfer-count
+            { hash: hash }
+            { count: new-transfer-id }
+        )
+        (map-delete ownership-transfers { hash: hash })
+        (var-set total-transfers (+ (var-get total-transfers) u1))
+        (ok true)
+    )
+)
+
+(define-public (cancel-ownership-transfer (hash (string-ascii 64)))
+    (let
+        ((transfer-info (unwrap! (map-get? ownership-transfers { hash: hash }) ERR-TRANSFER-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (get from-owner transfer-info)) ERR-NOT-AUTHORIZED)
+        (asserts! (get is-pending transfer-info) ERR-TRANSFER-NOT-FOUND)
+        (map-delete ownership-transfers { hash: hash })
+        (ok true)
+    )
+)
+
+(define-public (reject-ownership-transfer (hash (string-ascii 64)))
+    (let
+        ((transfer-info (unwrap! (map-get? ownership-transfers { hash: hash }) ERR-TRANSFER-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (get to-owner transfer-info)) ERR-NOT-TRANSFER-RECIPIENT)
+        (asserts! (get is-pending transfer-info) ERR-TRANSFER-NOT-FOUND)
+        (map-delete ownership-transfers { hash: hash })
+        (ok true)
+    )
+)
+
+(define-read-only (get-pending-transfer (hash (string-ascii 64)))
+    (ok (map-get? ownership-transfers { hash: hash }))
+)
+
+(define-read-only (has-pending-transfer (hash (string-ascii 64)))
+    (match (map-get? ownership-transfers { hash: hash })
+        transfer-info (ok (and 
+            (get is-pending transfer-info)
+            (<= stacks-block-height (get expiration-block transfer-info))))
+        (ok false)
+    )
+)
+
+(define-read-only (get-transfer-history
+    (hash (string-ascii 64))
+    (transfer-id uint))
+    (ok (map-get? transfer-history { hash: hash, transfer-id: transfer-id }))
+)
+
+(define-read-only (get-document-transfer-count (hash (string-ascii 64)))
+    (ok (default-to { count: u0 } (map-get? document-transfer-count { hash: hash })))
+)
+
+(define-read-only (get-total-transfers)
+    (ok (var-get total-transfers))
+)
+
+(define-read-only (is-transfer-expired (hash (string-ascii 64)))
+    (match (map-get? ownership-transfers { hash: hash })
+        transfer-info (ok (> stacks-block-height (get expiration-block transfer-info)))
+        (ok false)
+    )
+)
+
+(define-public (set-transfer-expiration-blocks (blocks uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> blocks u0) ERR-INVALID-EXPIRATION)
+        (var-set transfer-expiration-blocks blocks)
+        (ok true)
+    )
+)
+
+(define-read-only (get-transfer-expiration-blocks)
+    (ok (var-get transfer-expiration-blocks))
+)
