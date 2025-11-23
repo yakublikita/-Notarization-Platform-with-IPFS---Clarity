@@ -790,3 +790,309 @@
 (define-read-only (get-transfer-expiration-blocks)
     (ok (var-get transfer-expiration-blocks))
 )
+
+(define-constant ERR-DISPUTE-EXISTS (err u700))
+(define-constant ERR-DISPUTE-NOT-FOUND (err u701))
+(define-constant ERR-DISPUTE-RESOLVED (err u702))
+(define-constant ERR-NOT-ARBITRATOR (err u703))
+(define-constant ERR-CANNOT-DISPUTE-OWN (err u704))
+(define-constant ERR-INVALID-EVIDENCE (err u705))
+(define-constant ERR-MAX-EVIDENCE-REACHED (err u706))
+(define-constant ERR-DISPUTE-EXPIRED (err u707))
+(define-constant ERR-INVALID-RESOLUTION (err u708))
+
+(define-map disputes
+    { hash: (string-ascii 64), dispute-id: uint }
+    {
+        disputer: principal,
+        reason: (string-ascii 256),
+        initiated-at: uint,
+        status: (string-ascii 16),
+        resolution: (string-ascii 256),
+        arbitrator: (optional principal),
+        resolved-at: uint,
+        resolution-type: (string-ascii 16)
+    }
+)
+
+(define-map dispute-evidence
+    { hash: (string-ascii 64), dispute-id: uint, evidence-id: uint }
+    {
+        submitted-by: principal,
+        evidence-hash: (string-ascii 64),
+        evidence-description: (string-ascii 256),
+        submitted-at: uint
+    }
+)
+
+(define-map document-dispute-summary
+    { hash: (string-ascii 64) }
+    {
+        total-disputes: uint,
+        active-disputes: uint,
+        resolved-disputes: uint,
+        total-evidence-count: uint
+    }
+)
+
+(define-map arbitrators
+    { arbitrator: principal }
+    {
+        is-active: bool,
+        cases-resolved: uint,
+        reputation: uint
+    }
+)
+
+(define-map evidence-count
+    { hash: (string-ascii 64), dispute-id: uint }
+    { count: uint }
+)
+
+(define-data-var total-disputes uint u0)
+(define-data-var max-evidence-per-dispute uint u10)
+(define-data-var dispute-expiration-blocks uint u2880)
+
+(define-public (add-arbitrator (arbitrator principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (map-set arbitrators
+            { arbitrator: arbitrator }
+            {
+                is-active: true,
+                cases-resolved: u0,
+                reputation: u100
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (remove-arbitrator (arbitrator principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (map-set arbitrators
+            { arbitrator: arbitrator }
+            {
+                is-active: false,
+                cases-resolved: u0,
+                reputation: u0
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (raise-dispute
+    (hash (string-ascii 64))
+    (reason (string-ascii 256)))
+    (let
+        ((doc-info (unwrap! (get-document-info hash) ERR-DOCUMENT-NOT-FOUND))
+         (current-summary (default-to
+            { total-disputes: u0, active-disputes: u0, resolved-disputes: u0, total-evidence-count: u0 }
+            (map-get? document-dispute-summary { hash: hash })))
+         (new-dispute-id (+ (get total-disputes current-summary) u1))
+         (current-block stacks-block-height))
+        (asserts! (not (is-eq tx-sender (get owner doc-info))) ERR-CANNOT-DISPUTE-OWN)
+        (asserts! (> (len reason) u0) ERR-INVALID-EVIDENCE)
+        (asserts! (<= (len reason) u256) ERR-INVALID-EVIDENCE)
+        (map-set disputes
+            { hash: hash, dispute-id: new-dispute-id }
+            {
+                disputer: tx-sender,
+                reason: reason,
+                initiated-at: current-block,
+                status: "pending",
+                resolution: "",
+                arbitrator: none,
+                resolved-at: u0,
+                resolution-type: ""
+            }
+        )
+        (map-set document-dispute-summary
+            { hash: hash }
+            {
+                total-disputes: new-dispute-id,
+                active-disputes: (+ (get active-disputes current-summary) u1),
+                resolved-disputes: (get resolved-disputes current-summary),
+                total-evidence-count: (get total-evidence-count current-summary)
+            }
+        )
+        (var-set total-disputes (+ (var-get total-disputes) u1))
+        (ok new-dispute-id)
+    )
+)
+
+(define-public (submit-evidence
+    (hash (string-ascii 64))
+    (dispute-id uint)
+    (evidence-hash (string-ascii 64))
+    (evidence-description (string-ascii 256)))
+    (let
+        ((dispute-info (unwrap! (map-get? disputes { hash: hash, dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+         (current-count (default-to { count: u0 } (map-get? evidence-count { hash: hash, dispute-id: dispute-id })))
+         (new-evidence-id (+ (get count current-count) u1))
+         (current-summary (unwrap! (map-get? document-dispute-summary { hash: hash }) ERR-DOCUMENT-NOT-FOUND))
+         (current-block stacks-block-height))
+        (asserts! (is-eq (get status dispute-info) "pending") ERR-DISPUTE-RESOLVED)
+        (asserts! (< (get count current-count) (var-get max-evidence-per-dispute)) ERR-MAX-EVIDENCE-REACHED)
+        (try! (validate-hash evidence-hash))
+        (asserts! (> (len evidence-description) u0) ERR-INVALID-EVIDENCE)
+        (map-set dispute-evidence
+            { hash: hash, dispute-id: dispute-id, evidence-id: new-evidence-id }
+            {
+                submitted-by: tx-sender,
+                evidence-hash: evidence-hash,
+                evidence-description: evidence-description,
+                submitted-at: current-block
+            }
+        )
+        (map-set evidence-count
+            { hash: hash, dispute-id: dispute-id }
+            { count: new-evidence-id }
+        )
+        (map-set document-dispute-summary
+            { hash: hash }
+            {
+                total-disputes: (get total-disputes current-summary),
+                active-disputes: (get active-disputes current-summary),
+                resolved-disputes: (get resolved-disputes current-summary),
+                total-evidence-count: (+ (get total-evidence-count current-summary) u1)
+            }
+        )
+        (ok new-evidence-id)
+    )
+)
+
+(define-public (resolve-dispute
+    (hash (string-ascii 64))
+    (dispute-id uint)
+    (resolution (string-ascii 256))
+    (resolution-type (string-ascii 16)))
+    (let
+        ((dispute-info (unwrap! (map-get? disputes { hash: hash, dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+         (arbitrator-info (unwrap! (map-get? arbitrators { arbitrator: tx-sender }) ERR-NOT-ARBITRATOR))
+         (current-summary (unwrap! (map-get? document-dispute-summary { hash: hash }) ERR-DOCUMENT-NOT-FOUND))
+         (current-block stacks-block-height))
+        (asserts! (get is-active arbitrator-info) ERR-NOT-ARBITRATOR)
+        (asserts! (is-eq (get status dispute-info) "pending") ERR-DISPUTE-RESOLVED)
+        (asserts! (> (len resolution) u0) ERR-INVALID-RESOLUTION)
+        (asserts! (or (is-eq resolution-type "upheld") (is-eq resolution-type "dismissed")) ERR-INVALID-RESOLUTION)
+        (map-set disputes
+            { hash: hash, dispute-id: dispute-id }
+            {
+                disputer: (get disputer dispute-info),
+                reason: (get reason dispute-info),
+                initiated-at: (get initiated-at dispute-info),
+                status: "resolved",
+                resolution: resolution,
+                arbitrator: (some tx-sender),
+                resolved-at: current-block,
+                resolution-type: resolution-type
+            }
+        )
+        (map-set document-dispute-summary
+            { hash: hash }
+            {
+                total-disputes: (get total-disputes current-summary),
+                active-disputes: (- (get active-disputes current-summary) u1),
+                resolved-disputes: (+ (get resolved-disputes current-summary) u1),
+                total-evidence-count: (get total-evidence-count current-summary)
+            }
+        )
+        (map-set arbitrators
+            { arbitrator: tx-sender }
+            {
+                is-active: (get is-active arbitrator-info),
+                cases-resolved: (+ (get cases-resolved arbitrator-info) u1),
+                reputation: (+ (get reputation arbitrator-info) u5)
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (withdraw-dispute
+    (hash (string-ascii 64))
+    (dispute-id uint))
+    (let
+        ((dispute-info (unwrap! (map-get? disputes { hash: hash, dispute-id: dispute-id }) ERR-DISPUTE-NOT-FOUND))
+         (current-summary (unwrap! (map-get? document-dispute-summary { hash: hash }) ERR-DOCUMENT-NOT-FOUND)))
+        (asserts! (is-eq tx-sender (get disputer dispute-info)) ERR-NOT-AUTHORIZED)
+        (asserts! (is-eq (get status dispute-info) "pending") ERR-DISPUTE-RESOLVED)
+        (map-set disputes
+            { hash: hash, dispute-id: dispute-id }
+            {
+                disputer: (get disputer dispute-info),
+                reason: (get reason dispute-info),
+                initiated-at: (get initiated-at dispute-info),
+                status: "withdrawn",
+                resolution: "Withdrawn by disputer",
+                arbitrator: none,
+                resolved-at: stacks-block-height,
+                resolution-type: "withdrawn"
+            }
+        )
+        (map-set document-dispute-summary
+            { hash: hash }
+            {
+                total-disputes: (get total-disputes current-summary),
+                active-disputes: (- (get active-disputes current-summary) u1),
+                resolved-disputes: (+ (get resolved-disputes current-summary) u1),
+                total-evidence-count: (get total-evidence-count current-summary)
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-dispute
+    (hash (string-ascii 64))
+    (dispute-id uint))
+    (ok (map-get? disputes { hash: hash, dispute-id: dispute-id }))
+)
+
+(define-read-only (get-dispute-evidence
+    (hash (string-ascii 64))
+    (dispute-id uint)
+    (evidence-id uint))
+    (ok (map-get? dispute-evidence { hash: hash, dispute-id: dispute-id, evidence-id: evidence-id }))
+)
+
+(define-read-only (get-document-dispute-summary (hash (string-ascii 64)))
+    (ok (map-get? document-dispute-summary { hash: hash }))
+)
+
+(define-read-only (get-arbitrator-info (arbitrator principal))
+    (ok (map-get? arbitrators { arbitrator: arbitrator }))
+)
+
+(define-read-only (get-evidence-count
+    (hash (string-ascii 64))
+    (dispute-id uint))
+    (ok (default-to { count: u0 } (map-get? evidence-count { hash: hash, dispute-id: dispute-id })))
+)
+
+(define-read-only (has-active-disputes (hash (string-ascii 64)))
+    (match (map-get? document-dispute-summary { hash: hash })
+        summary-info (ok (> (get active-disputes summary-info) u0))
+        (ok false)
+    )
+)
+
+(define-read-only (get-total-disputes)
+    (ok (var-get total-disputes))
+)
+
+(define-public (set-max-evidence-per-dispute (max-evidence uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+        (asserts! (> max-evidence u0) ERR-INVALID-EVIDENCE)
+        (var-set max-evidence-per-dispute max-evidence)
+        (ok true)
+    )
+)
+
+(define-read-only (get-max-evidence-per-dispute)
+    (ok (var-get max-evidence-per-dispute))
+)
